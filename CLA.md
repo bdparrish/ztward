@@ -1,6 +1,6 @@
 # Ztward Individual Contributor License Agreement
 
-**Version 1.0 — DRAFT, pending legal review. Do not rely on this text until this notice is removed.**
+**Version 1.0**
 
 Thank you for your interest in contributing to Ztward (the "Project"), maintained by Benjamin
 Parrish (the "Maintainer"). This Contributor License Agreement (the "Agreement") sets out the
@@ -97,7 +97,7 @@ binds any such successor.
 
 ## 11. General
 
-<!-- TODO(counsel): confirm the governing law and venue. -->
-This Agreement is governed by the laws of `<jurisdiction>`. If any provision is held
+This Agreement is governed by the laws of the Commonwealth of Virginia, United States.
+If any provision is held
 unenforceable, the remaining provisions remain in effect. This Agreement applies to all
 Contributions You have Submitted before accepting it and all Contributions You Submit afterward.

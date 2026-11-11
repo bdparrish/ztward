@@ -1,6 +1,6 @@
 # Ztward Corporate Contributor License Agreement
 
-**Version 1.0 — DRAFT, pending legal review. Do not rely on this text until this notice is removed.**
+**Version 1.0**
 
 This Corporate Contributor License Agreement (the "Agreement") lets an organization authorize its
 employees to contribute to Ztward (the "Project"), maintained by Benjamin Parrish (the
@@ -102,8 +102,8 @@ binds any such successor.
 
 ## 11. General
 
-<!-- TODO(counsel): confirm the governing law and venue. -->
-This Agreement is governed by the laws of `<jurisdiction>`. If any provision is held
+This Agreement is governed by the laws of the Commonwealth of Virginia, United States.
+If any provision is held
 unenforceable, the remaining provisions remain in effect. This Agreement applies to all
 Contributions the Corporation's Designated Employees have Submitted before it was signed and all
 Contributions they Submit afterward.
