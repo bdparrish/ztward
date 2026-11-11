@@ -6,7 +6,7 @@
 import Keycloak from 'keycloak-js';
 import type { Policy, Entitlement, AuditLog, JsonObject } from '@/types/models';
 
-const API_BASE_URL = import.meta.env.VITE_PAP_API_URL || 'http://localhost:8090';
+const API_BASE_URL = import.meta.env.VITE_PAP_API_URL || 'https://localhost:8090';
 
 export class ApiClient {
   private keycloak: Keycloak;

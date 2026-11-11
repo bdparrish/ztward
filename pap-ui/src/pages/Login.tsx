@@ -33,7 +33,7 @@ const Login = () => {
           <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-primary/10">
             <Shield className="h-8 w-8 text-primary" />
           </div>
-          <CardTitle className="text-2xl">Welcome to PolicyHub</CardTitle>
+          <CardTitle className="text-2xl">Welcome to Ztward PAP</CardTitle>
           <CardDescription>
             Sign in with your Keycloak account to manage policies and entitlements
           </CardDescription>

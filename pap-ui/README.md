@@ -1,73 +1,76 @@
-# Welcome to your Lovable project
+# Ztward PAP UI
 
-## Project info
+The web interface for Ztward's Policy Administration Point (PAP). Use it to write and manage the
+authorization policies and entitlements that Ztward's decision service enforces, and to review the
+audit log of changes.
 
-**URL**: https://lovable.dev/projects/88f57a37-7bde-47f6-a85b-ed3dd043e139
+## What you can do
 
-## How can I edit this code?
+- **Policies:** create, edit, enable and disable policies written in JSON, OPA (Rego) or XACML.
+- **Entitlements:** grant specific subjects access to resources and actions, optionally with
+  conditions and an expiry date.
+- **Audit logs:** see who changed which policy or entitlement, and when.
+- **Dashboard:** an overview of policies and entitlements.
 
-There are several ways of editing your application.
+Every page except sign-in requires a Keycloak login. All changes go through the PAP REST API
+(`go/cmd/pap-server`), which applies the same validation and audit logging as API clients.
 
-**Use Lovable**
+## Running it
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/88f57a37-7bde-47f6-a85b-ed3dd043e139) and start prompting.
+### With Docker (the whole stack)
 
-Changes made via Lovable will be committed automatically to this repo.
+`make docker-up` from the repository root builds and starts the UI with everything else. It is
+then available at http://localhost:3000. The image is built with the settings in
+[`.env.docker`](.env.docker), and its nginx forwards `/api/` to the PAP service.
 
-**Use your preferred IDE**
+### For development
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+You need Node.js and the Ztward stack running (`make docker-up`), so that the PAP API and Keycloak
+are available.
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
-
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+```bash
+cd pap-ui
+cp .env.example .env
+npm ci
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+Open http://localhost:3000. The development server always uses port 3000, because the Keycloak
+client only allows redirects back to it. If the Docker stack's UI container is running, stop it
+first (`docker stop ztward-pap-ui`) to free the port.
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+The PAP API is served over TLS with the local development certificates from `make certs`. If the
+browser rejects its certificate, trust the development CA (`config/examples/certs/ca.crt`) or
+open https://localhost:8090 once and accept the certificate.
 
-**Use GitHub Codespaces**
+### Configuration
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+| Variable | Default (`.env.example`) | Purpose |
+|---|---|---|
+| `VITE_PAP_API_URL` | `https://localhost:8090` | PAP REST API base URL |
+| `VITE_KEYCLOAK_URL` | `http://localhost:8080` | Keycloak base URL |
+| `VITE_KEYCLOAK_REALM` | `ztward` | Keycloak realm |
+| `VITE_KEYCLOAK_CLIENT_ID` | `ztward-pap-ui` | Public OIDC client for the UI |
 
-## What technologies are used for this project?
+These are build-time settings, embedded into the JavaScript bundle. Never put secrets in them.
 
-This project is built with:
+## Scripts
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+| Command | What it does |
+|---|---|
+| `npm run dev` | Start the development server on port 3000 |
+| `npm run build` | Production build into `build/` |
+| `npm run preview` | Serve the production build |
+| `npm run lint` | Run ESLint |
 
-## How can I deploy this project?
+## More detail
 
-Simply open [Lovable](https://lovable.dev/projects/88f57a37-7bde-47f6-a85b-ed3dd043e139) and click on Share -> Publish.
+- [PAP API guide](../docs/PAP_API_GUIDE.md): the REST API the UI uses
+- [Policy guides](../docs/customer/policies/JSON_POLICIES.md): writing JSON, OPA and XACML policies
+- [Entitlements guide](../docs/customer/entitlements/CREATING_ENTITLEMENTS.md)
 
-## Can I connect a custom domain to my Lovable project?
+Built with React, TypeScript, Vite, Tailwind CSS and shadcn/ui.
 
-Yes, you can!
+## License
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+AGPL-3.0-only, like the rest of the Ztward services. See [`LICENSING.md`](../LICENSING.md).

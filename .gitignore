@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+# Build-time settings for the PAP UI Docker image (public values only)
+!pap-ui/.env.docker
 *.bak
 scripts/cross-sdk.env
 scripts/.keycloak-tokens*.json

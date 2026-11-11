@@ -31,7 +31,7 @@ export const Layout = ({ children }: LayoutProps) => {
       <aside className="w-64 border-r border-border bg-sidebar">
         <div className="flex h-16 items-center border-b border-sidebar-border px-6">
           <Shield className="h-6 w-6 text-sidebar-primary" />
-          <span className="ml-2 text-lg font-semibold text-sidebar-foreground">PolicyHub</span>
+          <span className="ml-2 text-lg font-semibold text-sidebar-foreground">Ztward PAP</span>
         </div>
         
         <nav className="flex flex-col gap-1 p-4">

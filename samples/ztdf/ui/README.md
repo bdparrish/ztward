@@ -1,73 +1,75 @@
-# Welcome to your Lovable project
+# ZTDF Viewer
 
-## Project info
+A browser app that opens Zero Trust Data Format (`.ztdf`) files. Sign in, drop a `.ztdf` file
+onto the page, and the viewer asks Ztward's Key Access service for the file's key. If your
+attributes satisfy the file's policy, the file is decrypted and shown in the browser; if not,
+you see why access was denied.
 
-**URL**: https://lovable.dev/projects/e11b7982-9fd8-4116-bb9a-297bf8fd10fb
+The file is decrypted entirely in the browser with the Web Crypto API, using the
+[`@ztward/sdk`](../../../sdk/js) JavaScript SDK. The plaintext never leaves your machine.
 
-## How can I edit this code?
+## What it demonstrates
 
-There are several ways of editing your application.
+- **Policy enforced at open time:** whether a file opens is decided when you open it, not when it
+  was shared, so access can be changed or revoked after the file has been sent.
+- **Per-user client keys:** on first use the viewer generates a key pair for you, keeps the private
+  key non-extractable in the browser, and registers the public key with the Key Manager. Keys
+  expire after 24 hours by default (`VITE_CLIENT_KEY_EXPIRATION_MS`).
+- **Sign-in with OIDC:** authentication through Keycloak (PKCE), using the `ztdf-viewer` client.
 
-**Use Lovable**
+## Running it
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/e11b7982-9fd8-4116-bb9a-297bf8fd10fb) and start prompting.
+You need Node.js and the Ztward stack running locally (`make docker-up` from the repository root).
 
-Changes made via Lovable will be committed automatically to this repo.
+```bash
+# Build the JavaScript SDK the viewer depends on
+cd sdk/js && npm ci && npm run build && cd -
 
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
-
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+# Install and start the viewer
+cd samples/ztdf/ui
+cp .env.example .env      # defaults point at the local Docker stack
+npm ci
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+Open http://localhost:3002 and sign in with one of the development users from
+[Keycloak setup](../../../docs/KEYCLOAK_SETUP.md). The port is fixed at 3002 because the
+Keycloak client only allows redirects back to it.
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+### Configuration
 
-**Use GitHub Codespaces**
+| Variable | Default (`.env.example`) | Purpose |
+|---|---|---|
+| `VITE_KEYCLOAK_URL` | `http://localhost:8080` | Keycloak base URL |
+| `VITE_KEYCLOAK_REALM` | `ztward` | Keycloak realm |
+| `VITE_KEYCLOAK_CLIENT_ID` | `ztdf-viewer` | OIDC client for the viewer |
+| `VITE_KEY_ACCESS_URL` | `http://localhost:8081` | Key Access service (gRPC-Web via Envoy) |
+| `VITE_KEY_MANAGER_URL` | `http://localhost:8081` | Key Manager service (gRPC-Web via Envoy) |
+| `VITE_CLIENT_KEY_EXPIRATION_MS` | `86400000` (24 hours) | Lifetime of the browser's client key |
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+## Getting a `.ztdf` file to open
 
-## What technologies are used for this project?
+Create one with the `ztdf-client` command-line tool, which encrypts a file or text into a `.ztdf`
+file: see [`go/cmd/ztdf-client`](../../../go/cmd/ztdf-client/README.md). Whether the viewer can
+open it depends on the file's policy and the signed-in user's attributes; if access is denied,
+the viewer shows the reason returned by Key Access.
 
-This project is built with:
+## Scripts
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+| Command | What it does |
+|---|---|
+| `npm run dev` | Start the development server on port 3002 |
+| `npm run build` | Production build into `dist/` |
+| `npm run preview` | Serve the production build |
+| `npm run lint` | Run ESLint |
 
-## How can I deploy this project?
+## More detail
 
-Simply open [Lovable](https://lovable.dev/projects/e11b7982-9fd8-4116-bb9a-297bf8fd10fb) and click on Share -> Publish.
+[README_ZTDF.md](README_ZTDF.md) covers the implementation: the architecture, the security
+properties of the browser key handling, the `ZtdfClient` and `useZtdf` APIs, and troubleshooting.
 
-## Can I connect a custom domain to my Lovable project?
+Built with React, TypeScript, Vite, Tailwind CSS and shadcn/ui.
 
-Yes, you can!
+## License
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+Apache-2.0. See [`samples/LICENSE`](../../LICENSE).
