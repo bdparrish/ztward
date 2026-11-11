@@ -344,6 +344,9 @@ services:
     container_name: ztward-pap-ui
     ports:
       - "3000:8080"
+    volumes:
+      # Dev CA, so nginx can verify the PAP service's TLS certificate
+      - ../../config/examples/certs:/etc/ztward/certs:ro
     networks:
       - ztward-network
     depends_on:
