@@ -437,6 +437,12 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("service.name is required")
 	}
 
+	// allow_insecure_issuer skips the token issuer and client-ID checks; it exists
+	// for local development only and must never run under a production label.
+	if cfg.IsProduction() && cfg.OIDC.AllowInsecureIssuer {
+		return fmt.Errorf("oidc.allow_insecure_issuer must be false when service.environment is %q", cfg.Service.Environment)
+	}
+
 	// Validate server port
 	if cfg.Server.Port < 1 || cfg.Server.Port > 65535 {
 		return fmt.Errorf("server.port must be between 1 and 65535")

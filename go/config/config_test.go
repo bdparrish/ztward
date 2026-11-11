@@ -261,6 +261,64 @@ func TestValidateConfig(t *testing.T) {
 			errMsg:  "service.name is required",
 		},
 		{
+			name: "allow_insecure_issuer rejected in production",
+			config: &Config{
+				Service: ServiceConfig{
+					Name:        "test-service",
+					Environment: "production",
+				},
+				Server: ServerConfig{
+					Port: 8080,
+				},
+				OIDC: OIDCConfig{
+					Enabled:             true,
+					IssuerURL:           "https://auth.example.com/realms/ztward",
+					ClientID:            "ztward-pap",
+					AllowInsecureIssuer: true,
+				},
+			},
+			wantErr: true,
+			errMsg:  "oidc.allow_insecure_issuer must be false",
+		},
+		{
+			name: "allow_insecure_issuer allowed in development",
+			config: &Config{
+				Service: ServiceConfig{
+					Name:        "test-service",
+					Environment: "development",
+				},
+				Server: ServerConfig{
+					Port: 8080,
+				},
+				OIDC: OIDCConfig{
+					Enabled:             true,
+					IssuerURL:           "https://auth.example.com/realms/ztward",
+					ClientID:            "ztward-pap",
+					AllowInsecureIssuer: true,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "production with issuer checks enabled",
+			config: &Config{
+				Service: ServiceConfig{
+					Name:        "test-service",
+					Environment: "production",
+				},
+				Server: ServerConfig{
+					Port: 8080,
+				},
+				OIDC: OIDCConfig{
+					Enabled:             true,
+					IssuerURL:           "https://auth.example.com/realms/ztward",
+					ClientID:            "ztward-pap",
+					AllowInsecureIssuer: false,
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "CORS enabled without allowed origins",
 			config: &Config{
 				Service: ServiceConfig{

@@ -109,9 +109,11 @@ func main() {
 		}
 		logger.Startup("OIDC authentication initialized successfully")
 	} else {
+		// Without OIDC the PAP uses a mock that accepts every request, so never
+		// allow that under a production label.
 		if cfg.IsProduction() {
-			logger.Warn("OIDC authentication is disabled in production environment!")
-			logger.Warn("This is not recommended for production use.")
+			logger.Error("OIDC authentication is disabled in a production environment; refusing to start (set oidc.enabled: true)")
+			os.Exit(1)
 		}
 		logger.Startup("Using mock authentication for development")
 		authService = pap.NewMockAuthService()

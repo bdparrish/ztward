@@ -3,7 +3,7 @@
 service:
   name: pap-server
   version: 1.0.0
-  environment: production
+  environment: development
 
 server:
   host: 0.0.0.0
