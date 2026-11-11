@@ -1,6 +1,6 @@
 {
   "name": "@ztward/sdk",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "JavaScript SDK for Ztward platform with browser and Node.js support",
   "main": "dist/index.cjs",
