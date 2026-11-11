@@ -1,0 +1,98 @@
+import com.google.protobuf.gradle.*
+
+plugins {
+    id("java")
+    id("maven-publish")
+    id("com.google.protobuf") version "0.9.4"
+}
+
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
+    withSourcesJar()
+    withJavadocJar()
+}
+
+val fipsDependenciesEnabled = providers.gradleProperty("fips")
+    .map { it.equals("true", ignoreCase = true) || it == "1" }
+    .orElse(false)
+val bcFipsVersion = providers.gradleProperty("bcFipsVersion").orElse("2.1.2")
+val bcpkixFipsVersion = providers.gradleProperty("bcpkixFipsVersion").orElse("2.1.10")
+val bctlsFipsVersion = providers.gradleProperty("bctlsFipsVersion").orElse("2.1.22")
+
+group = "com.ztward"
+version = "0.1.0-SNAPSHOT"
+
+dependencies {
+    implementation("io.grpc:grpc-netty-shaded:1.65.0")
+    implementation("io.grpc:grpc-protobuf:1.65.0")
+    implementation("io.grpc:grpc-stub:1.65.0")
+    implementation("com.google.protobuf:protobuf-java:3.25.3")
+    implementation("com.google.protobuf:protobuf-java-util:3.25.3")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
+    implementation("org.slf4j:slf4j-api:2.0.13")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.17.1")
+    implementation("com.fasterxml.jackson.core:jackson-annotations:2.17.1")
+    implementation("javax.annotation:javax.annotation-api:1.3.2")
+    if (fipsDependenciesEnabled.get()) {
+        implementation("org.bouncycastle:bc-fips:${bcFipsVersion.get()}")
+        implementation("org.bouncycastle:bcpkix-fips:${bcpkixFipsVersion.get()}")
+        implementation("org.bouncycastle:bctls-fips:${bctlsFipsVersion.get()}")
+    }
+
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.0")
+    testImplementation("org.assertj:assertj-core:3.26.3")
+    testImplementation("io.grpc:grpc-inprocess:1.65.0")
+}
+
+repositories {
+    mavenCentral()
+    maven { url = uri("https://www.bouncycastle.org/repo") }
+}
+
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:3.25.3"
+    }
+    plugins {
+        id("grpc") {
+            artifact = "io.grpc:protoc-gen-grpc-java:1.65.0"
+        }
+    }
+    generateProtoTasks {
+        all().forEach { task ->
+            task.plugins {
+                id("grpc")
+            }
+        }
+    }
+}
+
+sourceSets {
+    main {
+        proto.srcDir("../../proto")
+    }
+}
+
+tasks.test {
+    useJUnitPlatform()
+}
+
+tasks.register<JavaExec>("runCrossSdkTool") {
+    group = "integration"
+    description = "Runs the cross-SDK crypto helper CLI"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.ztward.sdk.integration.CrossSdkTool")
+    standardInput = System.`in`
+}
+
+publishing {
+    publications {
+        create<MavenPublication>("maven") {
+            from(components["java"])
+        }
+    }
+}

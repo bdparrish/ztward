@@ -1,0 +1,60 @@
+# RDS PostgreSQL Configuration for Ztward
+# This file configures Ztward to use external RDS PostgreSQL
+#
+# Usage:
+#   helm install ztward ./ztward -n ztward \
+#     -f values-ecr.yaml \
+#     -f values-free-tier.yaml \
+#     -f values-rds.yaml   # copy of values-rds.example.yaml with your values
+
+# =============================================================================
+# Disable In-Cluster PostgreSQL
+# =============================================================================
+postgresql:
+  enabled: false
+  # Password used by Ztward services (via ztward-secret)
+  auth:
+    ztwardPassword: "<set-via-secret-or---set>"
+
+# =============================================================================
+# External PostgreSQL Configuration
+# =============================================================================
+# RDS Endpoint
+externalDatabase:
+  host: "<your-db-instance>.<id>.<region>.rds.amazonaws.com"
+  port: 5432
+  username: "postgres"
+  password: "<set-via-secret-or---set>"
+  database: "postgres"
+
+# =============================================================================
+# Service-Specific Database Configuration
+# =============================================================================
+# Each service needs to be configured to use the external database
+
+keycloak:
+  externalDatabase:
+    enabled: true
+    host: "<your-db-instance>.<id>.<region>.rds.amazonaws.com"
+    port: 5432
+    user: "postgres"
+    password: "<set-via-secret-or---set>"
+    database: "keycloak"
+
+keyManager:
+  config:
+    database:
+      host: "<your-db-instance>.<id>.<region>.rds.amazonaws.com"
+      port: 5432
+      user: "postgres"
+      password: "<set-via-secret-or---set>"
+      name: "ztward_keymanager"
+
+pap:
+  config:
+    database:
+      host: "<your-db-instance>.<id>.<region>.rds.amazonaws.com"
+      port: 5432
+      user: "postgres"
+      password: "<set-via-secret-or---set>"
+      name: "ztward_pap"

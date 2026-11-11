@@ -1,0 +1,15 @@
+# Allowlist: Go service images (Dockerfile, Dockerfile.pap) only need these.
+# pap-ui builds from its own context with its own .dockerignore.
+*
+!go/
+!third_party/
+!deployment/docker/entrypoint.sh
+
+# Local build output inside go/
+go/bin/
+go/.gocache/
+go/cmd/ztdf-client/ztdf-client
+go/ztdf-client
+go/platform-server
+**/*.test
+**/.DS_Store

@@ -1,0 +1,73 @@
+# Local Ingress overlay for Ztward on Minikube or other local clusters
+# Usage:
+#   helm install ztward ./ztward \
+#     -n ztward \
+#     --create-namespace \
+#     -f values-local.yaml \
+#     -f values-local-ingress.yaml
+#
+# Prerequisites:
+#   1. Enable the nginx ingress controller (e.g., `minikube addons enable ingress`)
+#   2. Point the hostnames below at your cluster IP (see LOCAL_DEVELOPMENT.md)
+#
+# Hostname map used in this file:
+#   PAP UI: ui.ztward.local
+#   Keycloak: auth.ztward.local
+#   PAP API: api.ztward.local
+#   Envoy gRPC: grpc.ztward.local
+
+keycloak:
+  config:
+    hostname: auth.ztward.local
+    hostnamePort: "80"
+    frontendUrl: ""
+  ingress:
+    enabled: true
+    className: nginx
+    annotations: {}
+    hosts:
+      - host: auth.ztward.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+papUI:
+  ingress:
+    enabled: true
+    className: nginx
+    annotations: {}
+    hosts:
+      - host: ui.ztward.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+pap:
+  config:
+    redirectUrl: "http://api.ztward.local/callback"
+  ingress:
+    enabled: true
+    className: nginx
+    annotations: {}
+    hosts:
+      - host: api.ztward.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+envoy:
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    hosts:
+      - host: grpc.ztward.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+    servicePort: 8443

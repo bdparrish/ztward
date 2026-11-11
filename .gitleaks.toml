@@ -1,0 +1,22 @@
+# gitleaks configuration: default rules, plus an allowlist for reviewed test
+# fixtures and documented sample data (none of these are live credentials).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Reviewed test fixtures and sample data"
+paths = [
+  # Throwaway keys and tokens generated for unit tests
+  '''_test\.go$''',
+  '''sdk/java/src/test/''',
+  '''third_party/gin/testdata/''',
+  # Sample ZTDF manifests (wrapped keys and assertion JWTs, no credentials)
+  '''go/test/files/tdf_1\.json$''',
+  '''docs/manifest\.json$''',
+  # Base64-encoded sample ZTDF policy
+  '''scripts/cross-sdk\.env\.example$''',
+  # Mentions a Secrets Manager secret *name*, not a secret value
+  '''docs/customer/integration/SECRETS_MANAGER\.md$''',
+  # Uses the literal placeholder "mock-token"
+  '''docs/PAP_SETUP_SUMMARY\.md$''',
+]

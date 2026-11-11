@@ -1,0 +1,215 @@
+package features
+
+import (
+	"strings"
+	"sync"
+)
+
+// Build-time variables set via ldflags
+var (
+	// BuildMode indicates the build mode (demo, production, development)
+	BuildMode = "production"
+
+	// BuildFeatures is a comma-separated list of enabled features
+	// Can be overridden at build time with:
+	// -ldflags "-X github.com/bdparrish/ztward/go/features.BuildFeatures=feature1,feature2"
+	BuildFeatures = ""
+
+	// BuildVersion is the version of the build
+	BuildVersion = "dev"
+
+	// BuildTime is the time the binary was built
+	BuildTime = "unknown"
+)
+
+// Feature names
+const (
+	FeatureFullLogging   = "full-logging"
+	FeatureMetrics       = "metrics"
+	FeatureObservability = "observability"
+	FeatureRateLimiting  = "rate-limiting"
+	FeatureShortTimeouts = "short-timeouts"
+	FeatureCaching       = "caching"
+)
+
+var (
+	featureCache = make(map[string]bool)
+	cacheMux     sync.RWMutex
+
+	// rateLimitingConfigEnabled tracks whether the runtime config explicitly
+	// disables rate limiting. It is intentionally kept outside the cached
+	// feature map so a config override can disable the feature even when the
+	// build flag is present.
+	rateLimitingConfigEnabled = true
+	rateLimitingConfigSet     = false
+
+	metricsConfigEnabled              = true
+	metricsConfigSet                  = false
+	observabilityTracingConfigEnabled = true
+	observabilityConfigSet            = false
+	cachingConfigEnabled              = true
+	cachingConfigSet                  = false
+)
+
+// IsEnabled checks if a feature is enabled based on build-time flags
+func IsEnabled(feature string) bool {
+	cacheMux.RLock()
+	if enabled, found := featureCache[feature]; found {
+		cacheMux.RUnlock()
+		return enabled
+	}
+	cacheMux.RUnlock()
+
+	// Parse features from BuildFeatures
+	enabled := false
+	if BuildFeatures != "" {
+		features := strings.Split(BuildFeatures, ",")
+		for _, f := range features {
+			if strings.TrimSpace(f) == feature {
+				enabled = true
+				break
+			}
+		}
+	}
+
+	// Cache the result
+	cacheMux.Lock()
+	featureCache[feature] = enabled
+	cacheMux.Unlock()
+
+	return enabled
+}
+
+// IsDemoMode returns true if the build is in demo mode
+func IsDemoMode() bool {
+	return strings.ToLower(BuildMode) == "demo"
+}
+
+// IsProductionMode returns true if the build is in production mode
+func IsProductionMode() bool {
+	return strings.ToLower(BuildMode) == "production" || strings.ToLower(BuildMode) == "prod"
+}
+
+// IsDevelopmentMode returns true if the build is in development mode
+func IsDevelopmentMode() bool {
+	return strings.ToLower(BuildMode) == "development" || strings.ToLower(BuildMode) == "dev"
+}
+
+// GetEnabledFeatures returns a slice of all enabled features
+func GetEnabledFeatures() []string {
+	if BuildFeatures == "" {
+		return []string{}
+	}
+	features := strings.Split(BuildFeatures, ",")
+	result := make([]string, 0, len(features))
+	for _, f := range features {
+		trimmed := strings.TrimSpace(f)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+// ShouldEnableFullLogging returns true if full logging should be enabled
+func ShouldEnableFullLogging() bool {
+	// Full logging is enabled if:
+	// 1. Explicitly enabled via feature flag, OR
+	// 2. Not in demo mode (demo mode has minimal logging)
+	return IsEnabled(FeatureFullLogging) || !IsDemoMode()
+}
+
+// ShouldEnableMetrics returns true if metrics should be enabled
+func ShouldEnableMetrics() bool {
+	if metricsConfigSet && !metricsConfigEnabled {
+		return false
+	}
+
+	return IsEnabled(FeatureMetrics)
+}
+
+// ShouldEnableObservability returns true if observability should be enabled
+func ShouldEnableObservability() bool {
+	if observabilityConfigSet && !observabilityTracingConfigEnabled {
+		return false
+	}
+
+	return IsEnabled(FeatureObservability)
+}
+
+// ShouldEnableRateLimiting returns true if rate limiting should be enabled
+func ShouldEnableRateLimiting() bool {
+	// If configuration has explicitly disabled rate limiting, respect it even
+	// when the build flag is present.
+	if rateLimitingConfigSet && !rateLimitingConfigEnabled {
+		return false
+	}
+
+	return IsEnabled(FeatureRateLimiting)
+}
+
+// ShouldUseShortTimeouts returns true if short timeouts should be used
+func ShouldUseShortTimeouts() bool {
+	return IsEnabled(FeatureShortTimeouts) || IsDemoMode()
+}
+
+// ShouldEnableCaching returns true if advanced caching should be enabled
+func ShouldEnableCaching() bool {
+	if cachingConfigSet && !cachingConfigEnabled {
+		return false
+	}
+
+	return IsEnabled(FeatureCaching)
+}
+
+// GetBuildInfo returns build information as a map
+func GetBuildInfo() map[string]string {
+	return map[string]string{
+		"mode":      BuildMode,
+		"version":   BuildVersion,
+		"buildTime": BuildTime,
+		"features":  BuildFeatures,
+	}
+}
+
+// SetRateLimitingConfig records the runtime configuration toggle for rate
+// limiting so ShouldEnableRateLimiting can honor user configuration.
+func SetRateLimitingConfig(enabled bool) {
+	cacheMux.Lock()
+	rateLimitingConfigEnabled = enabled
+	rateLimitingConfigSet = true
+	cacheMux.Unlock()
+}
+
+// SetMetricsConfig records the runtime configuration toggle for metrics.
+func SetMetricsConfig(enabled bool) {
+	cacheMux.Lock()
+	metricsConfigEnabled = enabled
+	metricsConfigSet = true
+	cacheMux.Unlock()
+}
+
+// SetObservabilityConfig records the runtime configuration toggle for tracing/observability.
+func SetObservabilityConfig(tracingEnabled bool) {
+	cacheMux.Lock()
+	observabilityTracingConfigEnabled = tracingEnabled
+	observabilityConfigSet = true
+	cacheMux.Unlock()
+}
+
+// SetCachingConfig records the runtime configuration toggle for caching.
+func SetCachingConfig(enabled bool) {
+	cacheMux.Lock()
+	cachingConfigEnabled = enabled
+	cachingConfigSet = true
+	cacheMux.Unlock()
+}
+
+// ClearFeatureCache clears the in-memory feature flag cache so that subsequent
+// calls to IsEnabled / ShouldEnable* pick up changes to BuildFeatures. This is
+// intended for use in tests that mutate BuildFeatures between sub-tests.
+func ClearFeatureCache() {
+	cacheMux.Lock()
+	featureCache = make(map[string]bool)
+	cacheMux.Unlock()
+}

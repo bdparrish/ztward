@@ -1,0 +1,116 @@
+site_name: Ztward
+site_description: Zero Trust Data Format platform with attribute-based access control
+site_url: https://bdparrish.github.io/ztward/
+repo_url: https://github.com/bdparrish/ztward
+repo_name: bdparrish/ztward
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2026 Benjamin Parrish
+
+docs_dir: docs
+
+# Internal working notes that stay in the repository but are not published.
+exclude_docs: |
+  PAP_SETUP_SUMMARY.md
+  comprehensive_plan.md
+  CUSTOMER_DISTRIBUTION.md
+  misc/
+  patent/
+
+# Rewrites links to files outside docs/ (source code, config examples) to GitHub URLs.
+hooks:
+  - scripts/mkdocs_hooks.py
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Configuration: CONFIGURATION.md
+      - Keycloak setup: KEYCLOAK_SETUP.md
+      - Makefile usage: MAKEFILE_USAGE.md
+      - Feature flags: FEATURE_FLAGS.md
+      - Demo builds: MAKEFILE_DEMO.md
+  - User guide:
+      - Overview: customer/README.md
+      - Policies:
+          - JSON policies: customer/policies/JSON_POLICIES.md
+          - OPA policies: customer/policies/OPA_POLICIES.md
+          - XACML policies: customer/policies/XACML_POLICIES.md
+          - Policy best practices: customer/policies/BEST_PRACTICES.md
+      - Entitlements:
+          - Creating entitlements: customer/entitlements/CREATING_ENTITLEMENTS.md
+          - Examples: customer/entitlements/EXAMPLES.md
+      - Integrations:
+          - OIDC: customer/integration/OIDC_INTEGRATION.md
+          - Database: customer/integration/DATABASE_INTEGRATION.md
+          - Secrets managers: customer/integration/SECRETS_MANAGER.md
+          - Key manager: customer/integration/KEY_MANAGER.md
+  - Access control:
+      - ABAC API: api-attribute-based-access-control.md
+      - ABAC API example: abac-api-example.md
+      - ZTDF attribute conventions: ztdf-attribute-conventions.md
+      - Migrating to attribute-based access: migration-guide-attribute-based.md
+      - Platform PDP integration: PLATFORM_PDP_INTEGRATION.md
+  - Policy administration:
+      - PAP API: PAP_API_GUIDE.md
+      - PAP CLI: PAP_CLI_README.md
+      - PAP CLI usage: PAP_CLI_USAGE.md
+  - ZTDF:
+      - Creating ZTDF files: ZTDF_CREATION.md
+      - YubiKey runbook: YUBIKEY_ZTDF_RUNBOOK.md
+  - SDKs:
+      - Go client tutorial: customer/samples/GOLANG_CLIENT_SAMPLE.md
+      - Go SDK: https://github.com/bdparrish/ztward/tree/main/sdk/go
+      - JavaScript SDK: https://github.com/bdparrish/ztward/tree/main/sdk/js
+      - Python SDK: https://github.com/bdparrish/ztward/tree/main/sdk/python
+      - Java SDK: https://github.com/bdparrish/ztward/tree/main/sdk/java
+  - Security:
+      - FIPS 140-3: SECURITY_FIPS.md
+      - Encrypted key storage: key-storage-implementation.md
+      - Reporting vulnerabilities: https://github.com/bdparrish/ztward/blob/main/SECURITY.md
+  - Operations:
+      - Observability runbook: OBSERVABILITY_RUNBOOK.md
+      - Load testing: LOAD_TESTING.md
+      - Caching layer: CACHING_LAYER.md
+      - Route 53 subdomains: ROUTE53_SUBDOMAINS.md
+  - Contributing:
+      - Contributing guide: https://github.com/bdparrish/ztward/blob/main/CONTRIBUTING.md
+      - Codemaps: CODEMAPS/README.md
+      - Architecture: CODEMAPS/architecture.md
+      - Backend services: CODEMAPS/backend.md
+      - Data models: CODEMAPS/data.md
+      - Dependencies: CODEMAPS/dependencies.md
+      - SDKs: CODEMAPS/sdks.md
+  - Licensing: https://github.com/bdparrish/ztward/blob/main/LICENSING.md

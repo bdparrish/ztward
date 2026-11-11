@@ -1,0 +1,368 @@
+name: ztward
+
+services:
+  # PostgreSQL database for Keycloak and PAP
+  postgres:
+    image: postgres:15-alpine
+    container_name: ztward-postgres
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-keycloak_password}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../postgres/01-init-multiple-dbs.sql:/docker-entrypoint-initdb.d/01-init-multiple-dbs.sql:ro
+      - ../postgres/02-init.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
+      - ../postgres/03-init-keymanager.sql:/docker-entrypoint-initdb.d/03-init-keymanager.sql:ro
+    networks:
+      - ztward-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Keycloak OIDC Provider
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0
+    container_name: ztward-keycloak
+    command:
+      - start-dev
+      - --import-realm
+      - --http-enabled=true
+      - --hostname-strict=false
+      - --hostname-strict-https=false
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-keycloak_password}
+      # Hostname configuration for dual access (localhost + Docker network)
+      # Let Keycloak mirror the incoming Host header so browsers keep using localhost
+      # while backend services call it via the Docker service name (keycloak).
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HOSTNAME_STRICT_BACKCHANNEL: "false"
+      # Allow Keycloak to advertise localhost for frontend URLs but keycloak for backend
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_RELATIVE_PATH: /
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+    ports:
+      - "${KEYCLOAK_PORT:-8080}:8080"
+    volumes:
+      - ../../keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ztward-network
+    healthcheck:
+      test: [ "CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && timeout 2 cat <&3 | grep -q 'status.*UP'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: ztward-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - ztward-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Platform Service
+  platform:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
+      args:
+        SERVICE_NAME: platform-server
+        SERVICE_PORT: 50051
+        BUILD_FEATURES: metrics,observability,caching,rate-limiting
+        GOFIPS140: ${GOFIPS140:-v1.0.0}
+        BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
+    image: local/platform-server:latest
+    container_name: ztward-platform
+    ports:
+      - "50051:50051"
+      - "9090:9090"
+    environment:
+      # Database password (override via config)
+      - ZTWARD_DATABASE_PASSWORD=ztward
+      # Cache password if needed
+      - ZTWARD_CACHE_REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      # FIPS switch
+      - GODEBUG=fips140=on
+    volumes:
+      # Mount configuration file
+      - ../../config/examples/platform-server.yaml:/etc/ztward/ztward.yaml:ro
+      # Mount local TLS certs
+      - ../../config/examples/certs:/etc/ztward/certs:ro
+    networks:
+      - ztward-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50051"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Key Manager Service
+  key-manager:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
+      args:
+        SERVICE_NAME: key-manager-server
+        SERVICE_PORT: 50052
+        BUILD_FEATURES: metrics,observability,caching,rate-limiting
+        GOFIPS140: ${GOFIPS140:-v1.0.0}
+        BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
+    image: local/key-manager-server:latest
+    container_name: ztward-key-manager
+    ports:
+      - "50052:50052"
+    environment:
+      # Database password
+      - ZTWARD_DATABASE_PASSWORD=ztward
+      # OIDC client secret
+      - ZTWARD_OIDC_CLIENT_SECRET=${OIDC_KEY_MANAGER_CLIENT_SECRET:-ztward-key-manager-secret}
+      # Optional: Direct admin key (development only - NOT recommended for production)
+      - ZTWARD_ADMIN_KEY=${ZTWARD_ADMIN_KEY:-}
+      # FIPS switch
+      - GODEBUG=fips140=on
+    volumes:
+      # Mount configuration file
+      - ../../config/examples/key-manager.yaml:/etc/ztward/ztward.yaml:ro
+      # Mount local TLS certs
+      - ../../config/examples/certs:/etc/ztward/certs:ro
+      # Mount volume for admin key persistence
+      - ${HOME}/.ztward/admin-key:/var/run/secrets/ztward/admin-key:ro
+      # Mount seed data configuration
+      - ../../config/examples/key-manager-seed-data.yaml:/etc/ztward/key-manager-seed.yaml:ro
+    networks:
+      - ztward-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50052"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Key Access Service
+  key-access:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
+      args:
+        SERVICE_NAME: key-access-server
+        SERVICE_PORT: 50053
+        BUILD_FEATURES: metrics,observability,caching,rate-limiting
+        GOFIPS140: ${GOFIPS140:-v1.0.0}
+        BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
+    image: local/key-access-server:latest
+    container_name: ztward-key-access
+    ports:
+      - "50053:50053"
+      - "9093:9093"
+    environment:
+      # OIDC client secret
+      - ZTWARD_OIDC_CLIENT_SECRET=${OIDC_KEY_ACCESS_CLIENT_SECRET:-ztward-key-access-secret}
+      # FIPS switch
+      - GODEBUG=fips140=on
+    volumes:
+      # Mount configuration file
+      - ../../config/examples/key-access-server.yaml:/etc/ztward/ztward.yaml:ro
+      # Mount local TLS certs
+      - ../../config/examples/certs:/etc/ztward/certs:ro
+    networks:
+      - ztward-network
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      key-manager:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50053"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Prometheus scraping Ztward services
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: ztward-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-lifecycle
+    ports:
+      - "9095:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    depends_on:
+      platform:
+        condition: service_started
+      key-access:
+        condition: service_started
+    networks:
+      - ztward-network
+    restart: unless-stopped
+
+  # Grafana dashboards for PDP / Key Access telemetry
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: ztward-grafana
+    ports:
+      - "3030:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    networks:
+      - ztward-network
+    restart: unless-stopped
+
+  # OpenTelemetry Collector for traces
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.101.0
+    container_name: ztward-otel-collector
+    command:
+      - "--config=/etc/otel/config.yaml"
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    networks:
+      - ztward-network
+    restart: unless-stopped
+
+  # PAP (Policy Administration Point) Service
+  pap:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile.pap
+      args:
+        GOFIPS140: ${GOFIPS140:-v1.0.0}
+        BUILD_TAGS: ${GO_BUILD_TAGS:-fips}
+    image: local/pap-server:latest
+    container_name: ztward-pap
+    ports:
+      - "8090:8090"
+    environment:
+      # Database password
+      - ZTWARD_DATABASE_PASSWORD=ztward
+      # Cache password if needed
+      - ZTWARD_CACHE_REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      # OIDC client secret (if enabling OIDC)
+      - ZTWARD_OIDC_CLIENT_SECRET=${PAP_OIDC_CLIENT_SECRET:-ztward-pap-secret}
+      # FIPS switch
+      - GODEBUG=fips140=on
+    volumes:
+      # Mount configuration file
+      - ../../config/examples/pap-server.yaml:/etc/ztward/ztward.yaml:ro
+      # Mount local TLS certs
+      - ../../config/examples/certs:/etc/ztward/certs:ro
+    networks:
+      - ztward-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "--no-verbose", "--tries=1", "-O", "/dev/null", "https://localhost:8090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Web UI
+  # Envoy proxy for gRPC-Web
+  envoy:
+    image: envoyproxy/envoy:v1.28-latest
+    container_name: ztward-envoy
+    ports:
+      - "8081:8081"  # gRPC-Web port
+      - "9901:9901"  # Admin port
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ../../config/examples/certs:/etc/envoy/certs:ro
+    networks:
+      - ztward-network
+    command: /usr/local/bin/envoy -c /etc/envoy/envoy.yaml
+    restart: unless-stopped
+
+  pap-ui:
+    build:
+      context: ../../pap-ui
+      dockerfile: Dockerfile
+      args:
+        VITE_MODE: docker
+    image: local/pap-ui:latest
+    container_name: ztward-pap-ui
+    ports:
+      - "3000:8080"
+    networks:
+      - ztward-network
+    depends_on:
+      pap:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  ztward-network:
+    driver: bridge
+    name: ztward-network
+
+volumes:
+  postgres_data:
+  key-manager-secrets:

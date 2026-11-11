@@ -1,0 +1,888 @@
+package key_access
+
+import (
+	"context"
+	"crypto"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdsa"
+	"crypto/hkdf"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"github.com/bdparrish/ztward/go/config"
+	"github.com/bdparrish/ztward/go/pkg/auth"
+	"github.com/bdparrish/ztward/go/pkg/extractors"
+	"math/big"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/bdparrish/ztward/go/pkg/models"
+	"github.com/bdparrish/ztward/go/pkg/security/tlspolicy"
+	keyManager "github.com/bdparrish/ztward/go/services/key-manager"
+
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/attribute"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+type KeyAccessServiceConfig struct {
+	KeyAccessAddr  string
+	KeyManagerAddr string
+	KeyStorePath   string
+	AuthConfig     *auth.AuthConfig
+}
+
+// Server implements the KeyAccessService
+type Server struct {
+	UnimplementedKeyAccessServiceServer
+	mu               sync.RWMutex
+	keyManagerClient keyManager.KeyManagerServiceClient
+	keyManagerConn   *grpc.ClientConn
+	platformConn     *grpc.ClientConn
+	platformClient   PlatformClient
+	authService      *auth.AuthService
+	authProvider     auth.AuthProvider
+	serviceKeyCache  *serviceKeyCache
+	rewrapClientDEK  func(ctx context.Context, req *keyManager.RewrapClientDEKRequest) (*keyManager.RewrapClientDEKResponse, error)
+	fipsEnabled      bool
+}
+
+// SubjectKeyStore manages public keys for subjects
+type SubjectKeyStore interface {
+	GetSubjectPublicKey(ctx context.Context, subject string) (crypto.PublicKey, error)
+	StoreSubjectPublicKey(ctx context.Context, subject string, publicKey crypto.PublicKey) error
+	ListSubjects(ctx context.Context) ([]string, error)
+}
+
+// PlatformClient interface for ABAC evaluation
+type PlatformClient interface {
+	EvaluateAccess(ctx context.Context, resourceAttributes map[string]string, action string, context map[string]string) (*AccessDecision, error)
+}
+
+// AccessDecision represents the result of ABAC evaluation
+type AccessDecision struct {
+	Granted      bool
+	Reason       string
+	AppliedRules []string
+	Context      map[string]string
+}
+
+// InMemorySubjectKeyStore provides an in-memory implementation
+type InMemorySubjectKeyStore struct {
+	mu   sync.RWMutex
+	keys map[string]crypto.PublicKey
+}
+
+// NewServer creates a new key access server
+func NewServer(keyManagerAddr string, cfg *config.Config) (*Server, error) {
+	if err := tlspolicy.RequireTLSInFIPS(cfg.Security.FIPS.Enabled, cfg.Services.KeyManager.TLS.Enabled); err != nil {
+		return nil, err
+	}
+	if err := tlspolicy.RequireTLSInFIPS(cfg.Security.FIPS.Enabled, cfg.Services.Platform.TLS.Enabled); err != nil {
+		return nil, err
+	}
+
+	keyManagerCreds, err := dialServiceCredentials(&cfg.Services.KeyManager)
+	if err != nil {
+		return nil, err
+	}
+
+	// Connect to key manager service
+	conn, err := grpc.NewClient(
+		keyManagerAddr,
+		grpc.WithTransportCredentials(keyManagerCreds),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to key manager: %w", err)
+	}
+
+	keyManagerClient := keyManager.NewKeyManagerServiceClient(conn)
+
+	// Create auth service from the provided auth config
+	authService, err := createAuthServiceFromConfig(&cfg.OIDC)
+	if err != nil {
+		logger.Info("Warning: Failed to create OIDC auth service: %v. Using mock auth.", err)
+		return nil, err
+	}
+
+	// Create Platform client (PDP) or use mock for testing
+	platformClient, platformConn, err := createPlatformClient(&cfg.Services.Platform)
+	if err != nil {
+		logger.Info("Warning: Failed to connect to Platform service: %v", err)
+	}
+
+	// Create auth provider
+	authProvider, err := auth.NewKeycloakAuthProvider(&auth.AuthConfig{
+		IssuerURL:           cfg.OIDC.IssuerURL,
+		ClientID:            cfg.OIDC.ClientID,
+		ClientSecret:        cfg.OIDC.ClientSecret,
+		AllowInsecureIssuer: cfg.OIDC.AllowInsecureIssuer,
+	})
+	if err != nil {
+		return nil, &models.Error{
+			Code:    "AUTH_PROVIDER_INIT_FAILED",
+			Message: "failed to create auth provider",
+			Err:     err,
+		}
+	}
+
+	cacheTTL := time.Duration(cfg.Service.ServiceKeyCacheTTLSeconds) * time.Second
+	if cacheTTL <= 0 {
+		cacheTTL = 5 * time.Minute
+	}
+
+	server := &Server{
+		keyManagerClient: keyManagerClient,
+		keyManagerConn:   conn,
+		platformConn:     platformConn,
+		platformClient:   platformClient,
+		authService:      authService,
+		authProvider:     authProvider,
+		serviceKeyCache:  newServiceKeyCache(cacheTTL),
+		fipsEnabled:      cfg.Security.FIPS.Enabled,
+	}
+	server.rewrapClientDEK = func(ctx context.Context, req *keyManager.RewrapClientDEKRequest) (*keyManager.RewrapClientDEKResponse, error) {
+		return server.keyManagerClient.RewrapClientDEK(ctx, req)
+	}
+
+	logger.Info("Key Access server initialized successfully")
+	return server, nil
+}
+
+// createPlatformClient creates a Platform client from environment variables
+func createPlatformClient(config *config.ServiceEndpoint) (PlatformClient, *grpc.ClientConn, error) {
+	platformAddr := config.Address
+
+	if platformAddr == "" {
+		return nil, nil, fmt.Errorf("gRPC Platform Address not configured in environment")
+	}
+
+	logger.Info("Connecting to Platform service at: %s", platformAddr)
+	client, err := NewGRPCPlatformClient(platformAddr, config)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return client, client.conn, nil
+}
+
+func dialServiceCredentials(endpoint *config.ServiceEndpoint) (credentials.TransportCredentials, error) {
+	if endpoint != nil && endpoint.TLS.Enabled {
+		tlsConfig, err := tlspolicy.LoadClientConfig(endpoint.Address, endpoint.TLS.CAFile)
+		if err != nil {
+			return nil, err
+		}
+		return credentials.NewTLS(tlsConfig), nil
+	}
+	return insecure.NewCredentials(), nil
+}
+
+// createAuthServiceFromConfig creates an auth service from auth config
+func createAuthServiceFromConfig(oidcConfig *config.OIDCConfig) (*auth.AuthService, error) {
+	if oidcConfig == nil || oidcConfig.IssuerURL == "" || oidcConfig.ClientID == "" {
+		return nil, fmt.Errorf("OIDC configuration incomplete: issuer_url and client_id are required")
+	}
+
+	logger.Info("Initializing OIDC auth with issuer: %s, client: %s", oidcConfig.IssuerURL, oidcConfig.ClientID)
+	authService, err := auth.NewAuthService(oidcConfig)
+	if err != nil {
+		return nil, errors.New("OIDC provider unreachable: " + err.Error())
+	}
+	return authService, nil
+}
+
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := getEnv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func getEnv(key string) string {
+	return os.Getenv(key)
+}
+
+// Close closes the server connections
+func (s *Server) Close() error {
+	var err error
+	if s.keyManagerConn != nil {
+		if closeErr := s.keyManagerConn.Close(); closeErr != nil {
+			err = closeErr
+		}
+	}
+	if s.platformConn != nil {
+		if closeErr := s.platformConn.Close(); closeErr != nil {
+			err = closeErr
+		}
+	}
+	return err
+}
+
+// GetAuthService returns the authentication service
+func (s *Server) GetAuthService() *auth.AuthService {
+	return s.authService
+}
+
+// WrapDEK wraps a Data Encryption Key using the current encryption key
+func (s *Server) WrapDEK(ctx context.Context, req *WrapDEKRequest) (resp *WrapDEKResponse, err error) {
+	initKeyAccessTelemetry()
+
+	ctx, span := startKeyAccessSpan(ctx, "KeyAccess.WrapDEK",
+		attribute.String("resource", req.GetResource()),
+		attribute.String("action", req.GetAction()),
+	)
+	start := time.Now()
+	defer func() {
+		granted := false
+		if resp != nil {
+			granted = resp.AccessGranted
+			span.SetAttributes(attribute.Bool("access_granted", granted))
+			if !resp.AccessGranted && resp.AccessReason != "" {
+				span.SetAttributes(attribute.String("access_reason", resp.AccessReason))
+			}
+		}
+		if err != nil {
+			span.RecordError(err)
+		}
+		recordWrapTelemetry(ctx, time.Since(start), granted, err)
+		span.End()
+	}()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if tokenString, ok := ctx.Value("user_token").(string); ok {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+tokenString)
+	}
+
+	// Step 1: Extract user claims from OIDC token
+	jwtExtractor := &extractors.JWTClaimsExtractor{}
+	subjectAttributes, err := jwtExtractor.ExtractSubjectAttributesFromContext(ctx)
+	if err != nil {
+		// For testing, try mock token validation
+		return s.createWrapDeniedResponse(req, fmt.Sprintf("failed to extract subject attributes: %v", err)), nil
+	}
+
+	subjectValue := subjectAttributes["sub"]
+	subject, _ := subjectValue.(string)
+	if subject == "" {
+		subject = fmt.Sprintf("%v", subjectValue)
+	}
+
+	// Use preferred_username for ABAC matching (falls back to sub if not available)
+	userIdentifier := subject
+	if preferred, ok := subjectAttributes["preferred_username"].(string); ok && preferred != "" {
+		userIdentifier = preferred
+	}
+
+	logger.Info("WrapDEK called - User: %s (sub: %s), Resource: %s", userIdentifier, subject, req.Resource)
+
+	// Ensure client key ID is present (fallback to latest active key if omitted)
+	if err := s.ensureWrapClientKeyID(ctx, req, subject); err != nil {
+		return s.createWrapDeniedResponse(req, fmt.Sprintf("Invalid request: %v", err)), nil
+	}
+
+	// Step 2: Validate input
+	if err := s.validateWrapRequest(req); err != nil {
+		return s.createWrapDeniedResponse(req, fmt.Sprintf("Invalid request: %v", err)), nil
+	}
+
+	// Step 3: Evaluate ABAC rules with user from token
+	resourceAttributes, err := extractors.ExtractResourceAttributes(req.Policy)
+	if err != nil {
+		return s.createWrapDeniedResponse(req, fmt.Sprintf("failed to extract resource policy: %v", err)), nil
+	}
+
+	accessDecision, err := s.platformClient.EvaluateAccess(ctx, resourceAttributes, req.Action, req.Context)
+	if err != nil {
+		return s.createWrapDeniedResponse(req, fmt.Sprintf("ABAC evaluation failed: %v", err)), nil
+	}
+
+	if !accessDecision.Granted {
+		return s.createWrapDeniedResponse(req, accessDecision.Reason), nil
+	}
+
+	// Step 4: Get current encryption key from key manager
+	keyID := req.KeyId
+	if keyID == "" {
+		// Use a default key or get the current active key
+		keyID, err = s.getCurrentActiveKeyID(ctx)
+		if err != nil {
+			return s.createWrapDeniedResponse(req, fmt.Sprintf("Failed to get current key: %v", err)), nil
+		}
+	}
+
+	// Ensure the service key metadata is cached for latency tracking and validation
+	if _, err := s.getServicePublicKey(ctx, keyID); err != nil {
+		return s.createWrapDeniedResponse(req, fmt.Sprintf("Failed to load service key: %v", err)), nil
+	}
+
+	rewrapResp, err := s.rewrapClientDEK(ctx, &keyManager.RewrapClientDEKRequest{
+		Subject:          subject,
+		ClientKeyId:      req.ClientKeyId,
+		ClientWrappedDek: req.Dek,
+		ServiceKeyId:     keyID,
+		Resource:         req.Resource,
+	})
+	if err != nil {
+		return s.createWrapDeniedResponse(req, fmt.Sprintf("Failed to rewrap DEK: %v", err)), nil
+	}
+
+	if rewrapResp.GetServiceKeyId() != "" {
+		keyID = rewrapResp.GetServiceKeyId()
+	}
+
+	wrappedDEK := rewrapResp.GetServiceWrappedDek()
+
+	logger.Info("DEK wrapped successfully for user %s", userIdentifier)
+
+	return &WrapDEKResponse{
+		WrappedDek:    wrappedDEK,
+		KeyId:         keyID,
+		AccessGranted: true,
+		AccessReason:  accessDecision.Reason,
+		AppliedRules:  accessDecision.AppliedRules,
+		Timestamp:     timestamppb.Now(),
+	}, nil
+}
+
+// UnwrapDEK unwraps a Data Encryption Key with ABAC verification
+func (s *Server) UnwrapDEK(ctx context.Context, req *UnwrapDEKRequest) (resp *UnwrapDEKResponse, err error) {
+	initKeyAccessTelemetry()
+
+	ctx, span := startKeyAccessSpan(ctx, "KeyAccess.UnwrapDEK",
+		attribute.String("resource", req.GetResource()),
+		attribute.String("action", req.GetAction()),
+	)
+	start := time.Now()
+	defer func() {
+		granted := false
+		if resp != nil {
+			granted = resp.AccessGranted
+			span.SetAttributes(attribute.Bool("access_granted", granted))
+			if !resp.AccessGranted && resp.AccessReason != "" {
+				span.SetAttributes(attribute.String("access_reason", resp.AccessReason))
+			}
+		}
+		if err != nil {
+			span.RecordError(err)
+		}
+		recordUnwrapTelemetry(ctx, time.Since(start), granted, err)
+		span.End()
+	}()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if tokenString, ok := ctx.Value("user_token").(string); ok {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+tokenString)
+	}
+
+	// Step 1: Extract user claims from OIDC token
+	jwtExtractor := &extractors.JWTClaimsExtractor{}
+	subjectAttributes, err := jwtExtractor.ExtractSubjectAttributesFromContext(ctx)
+	if err != nil {
+		// For testing, try mock token validation
+		return s.createUnwrapDeniedResponse(req, fmt.Sprintf("failed to extract subject attributes: %v", err)), nil
+	}
+
+	subjectValue := subjectAttributes["sub"]
+	subject, _ := subjectValue.(string)
+	if subject == "" {
+		subject = fmt.Sprintf("%v", subjectValue)
+	}
+
+	// Use preferred_username for ABAC matching (falls back to sub if not available)
+	userIdentifier, _ := subjectAttributes["preferred_username"].(string)
+	if userIdentifier == "" {
+		userIdentifier = subject
+	}
+
+	logger.Info("UnwrapDEK called - User: %s (sub: %s), Resource: %s", userIdentifier, subject, req.Resource)
+
+	// Ensure client key ID is present (fallback for backward compatibility)
+	if err := s.ensureUnwrapClientKeyID(ctx, req, subject); err != nil {
+		return s.createUnwrapDeniedResponse(req, fmt.Sprintf("Invalid request: %v", err)), nil
+	}
+
+	// Step 2: Validate input
+	if err := s.validateUnwrapRequest(req); err != nil {
+		return s.createUnwrapDeniedResponse(req, fmt.Sprintf("Invalid request: %v", err)), nil
+	}
+
+	// Step 3: Evaluate ABAC rules with user from token
+	resourceAttributes, err := extractors.ExtractResourceAttributes(req.Policy)
+	if err != nil {
+		return s.createUnwrapDeniedResponse(req, fmt.Sprintf("failed to extract resource policy: %v", err)), nil
+	}
+
+	accessDecision, err := s.platformClient.EvaluateAccess(ctx, resourceAttributes, req.Action, req.Context)
+	if err != nil {
+		return s.createUnwrapDeniedResponse(req, fmt.Sprintf("ABAC evaluation failed: %v", err)), nil
+	}
+
+	if !accessDecision.Granted {
+		return s.createUnwrapDeniedResponse(req, accessDecision.Reason), nil
+	}
+
+	// Step 4: Unwrap the DEK using the key manager's private key, then re-encrypt for the subject
+	// The key manager has access to the private key needed to decrypt the wrapped DEK
+	unwrapResp, err := s.keyManagerClient.UnwrapDEK(ctx, &keyManager.UnwrapDEKRequest{
+		Subject:      subject,
+		Resource:     req.Resource,
+		EncryptedDek: req.WrappedDek,
+		ClientKeyId:  req.ClientKeyId,
+		KeyId:        req.KeyId,
+		Action:       req.Action,
+		Context:      req.Context,
+	})
+	if err != nil {
+		return s.createUnwrapDeniedResponse(req, fmt.Sprintf("Failed to unwrap DEK: %v", err)), nil
+	}
+
+	if !unwrapResp.AccessGranted {
+		return s.createUnwrapDeniedResponse(req, unwrapResp.AccessReason), nil
+	}
+
+	logger.Info("DEK unwrapped successfully for user %s", userIdentifier)
+
+	return &UnwrapDEKResponse{
+		DekForSubject: unwrapResp.EncryptedDekForSubject,
+		AccessGranted: true,
+		AccessReason:  accessDecision.Reason,
+		AppliedRules:  accessDecision.AppliedRules,
+		Timestamp:     timestamppb.Now(),
+	}, nil
+}
+
+// Helper methods
+
+func (s *Server) validateWrapRequest(req *WrapDEKRequest) error {
+	// Note: Subject is extracted from OIDC token, not from request
+	if req.Resource == "" {
+		return fmt.Errorf("resource is required")
+	}
+	if len(req.Dek) == 0 {
+		return fmt.Errorf("DEK is required")
+	}
+	if req.ClientKeyId == "" {
+		return fmt.Errorf("client key ID is required")
+	}
+
+	if req.Action == "" {
+		req.Action = "wrap_dek" // Default action
+	}
+	return nil
+}
+
+func (s *Server) validateUnwrapRequest(req *UnwrapDEKRequest) error {
+	// Note: Subject is extracted from OIDC token, not from request
+	if req.Resource == "" {
+		return fmt.Errorf("resource is required")
+	}
+	if req.KeyId == "" {
+		return fmt.Errorf("key ID is required")
+	}
+	if len(req.WrappedDek) == 0 {
+		return fmt.Errorf("wrapped DEK is required")
+	}
+	if req.Action == "" {
+		req.Action = "unwrap_dek" // Default action
+	}
+	return nil
+}
+
+func (s *Server) ensureWrapClientKeyID(ctx context.Context, req *WrapDEKRequest, subject string) error {
+	if req.ClientKeyId != "" {
+		return nil
+	}
+	keyID, err := s.lookupLatestClientKeyID(ctx, subject)
+	if err != nil {
+		return err
+	}
+	logger.Info("WrapDEK: no client_key_id provided, using latest active key %s for user %s", keyID, subject)
+	req.ClientKeyId = keyID
+	return nil
+}
+
+func (s *Server) ensureUnwrapClientKeyID(ctx context.Context, req *UnwrapDEKRequest, subject string) error {
+	if req.ClientKeyId != "" {
+		return nil
+	}
+	keyID, err := s.lookupLatestClientKeyID(ctx, subject)
+	if err != nil {
+		return err
+	}
+	logger.Info("UnwrapDEK: no client_key_id provided, using latest active key %s for user %s", keyID, subject)
+	req.ClientKeyId = keyID
+	return nil
+}
+
+func (s *Server) lookupLatestClientKeyID(ctx context.Context, subject string) (string, error) {
+	if subject == "" {
+		return "", fmt.Errorf("client key ID is required for anonymous subject")
+	}
+
+	resp, err := s.keyManagerClient.ListClientKeys(ctx, &keyManager.ListClientKeysRequest{
+		ClientId: subject,
+		PageSize: 50,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to list client keys: %w", err)
+	}
+
+	var latest *keyManager.Key
+	var latestTime time.Time
+	for _, key := range resp.Keys {
+		if key.GetStatus() != keyManager.KeyStatus_KEY_STATUS_ACTIVE {
+			continue
+		}
+		var createdAt time.Time
+		if ts := key.GetCreatedAt(); ts != nil {
+			createdAt = ts.AsTime()
+		}
+		if latest == nil || createdAt.After(latestTime) {
+			latest = key
+			latestTime = createdAt
+		}
+	}
+
+	if latest == nil {
+		return "", fmt.Errorf("no active client keys registered for user %s", subject)
+	}
+
+	return latest.GetKeyId(), nil
+}
+
+func (s *Server) getCurrentActiveKeyID(ctx context.Context) (string, error) {
+	// List keys and find an active one
+	listResp, err := s.keyManagerClient.ListKeys(ctx, &keyManager.ListKeysRequest{
+		PageSize: 1,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	if len(listResp.Keys) == 0 {
+		return "", fmt.Errorf("no keys available")
+	}
+
+	// Return the first active key
+	for _, key := range listResp.Keys {
+		if key.Status == keyManager.KeyStatus_KEY_STATUS_ACTIVE {
+			return key.KeyId, nil
+		}
+	}
+
+	return "", fmt.Errorf("no active keys found")
+}
+
+func (s *Server) parsePublicKeyPEM(pemData string, keyType keyManager.KeyType) (crypto.PublicKey, error) {
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM block")
+	}
+
+	if publicKey, ok, err := parseKyberPublicKey(block.Bytes, keyType); ok {
+		if err != nil {
+			return nil, err
+		}
+		logger.Info("Parsed KYBER public key")
+		return publicKey, nil
+	}
+
+	// For RSA and ECC, use standard x509 parsing
+	publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse public key: %w", err)
+	}
+	logger.Info("Parsed public key type: %T", publicKey)
+	return publicKey, nil
+}
+
+func (s *Server) encryptDEK(publicKey crypto.PublicKey, dek []byte) ([]byte, error) {
+	switch pubKey := publicKey.(type) {
+	case *rsa.PublicKey:
+		return rsa.EncryptOAEP(sha256.New(), rand.Reader, pubKey, dek, nil)
+
+	case *ecdsa.PublicKey:
+		// For ECC, we use ECIES (Elliptic Curve Integrated Encryption Scheme)
+		// Generate ephemeral key pair
+		ephemeralKey, err := ecdsa.GenerateKey(pubKey.Curve, rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate ephemeral key: %w", err)
+		}
+
+		// Derive shared secret using ECDH
+		sharedX, _ := pubKey.Curve.ScalarMult(pubKey.X, pubKey.Y, ephemeralKey.D.Bytes())
+
+		// Derive encryption key using HKDF
+		encKey, err := hkdf.Key(sha256.New, sharedX.Bytes(), nil, "key-access-dek-wrap", 32)
+		if err != nil {
+			return nil, fmt.Errorf("failed to derive encryption key: %w", err)
+		}
+
+		// Encrypt DEK using AES-GCM
+		block, err := aes.NewCipher(encKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create cipher: %w", err)
+		}
+
+		gcm, err := cipher.NewGCM(block)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create GCM: %w", err)
+		}
+
+		nonce := make([]byte, gcm.NonceSize())
+		if _, err := rand.Read(nonce); err != nil {
+			return nil, fmt.Errorf("failed to generate nonce: %w", err)
+		}
+
+		ciphertext := gcm.Seal(nonce, nonce, dek, nil)
+
+		// Return: ephemeral public key || ciphertext
+		ephemeralPubKey := append(ephemeralKey.PublicKey.X.Bytes(), ephemeralKey.PublicKey.Y.Bytes()...)
+		return append(ephemeralPubKey, ciphertext...), nil
+
+	default:
+		if encrypted, ok, err := s.encryptDEKWithKyber(publicKey, dek); ok {
+			return encrypted, err
+		}
+		return nil, fmt.Errorf("unsupported public key type: %T", publicKey)
+	}
+}
+
+// encryptDEKWithSharedSecret encrypts the DEK using a KEM shared secret
+func (s *Server) encryptDEKWithSharedSecret(dek, sharedSecret, kemCiphertext []byte) ([]byte, error) {
+	// Use the shared secret to encrypt the DEK with AES-GCM
+	block, err := aes.NewCipher(sharedSecret[:32]) // Use first 32 bytes for AES-256
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
+	}
+
+	// Encrypt the DEK
+	encryptedDEK := gcm.Seal(nonce, nonce, dek, nil)
+
+	// Return: KEM ciphertext || encrypted DEK
+	// The KEM ciphertext is needed to decapsulate and recover the shared secret
+	return append(kemCiphertext, encryptedDEK...), nil
+}
+
+// getServicePublicKey returns the cached service public key for the given key ID, fetching and parsing it if needed.
+func (s *Server) getServicePublicKey(ctx context.Context, keyID string) (crypto.PublicKey, error) {
+	ctx, span := startKeyAccessSpan(ctx, "KeyAccess.getServicePublicKey",
+		attribute.String("key_id", keyID),
+	)
+	defer span.End()
+
+	if pub, ok := s.serviceKeyCache.Get(keyID); ok {
+		return pub, nil
+	}
+
+	getKeyResp, err := s.keyManagerClient.GetKey(ctx, &keyManager.GetKeyRequest{
+		KeyId:            keyID,
+		IncludePublicKey: true,
+	})
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("failed to get service key: %w", err)
+	}
+	if s.fipsEnabled && !isFIPSKeyTypeAllowed(getKeyResp.Key.KeyType) {
+		return nil, fmt.Errorf("service key type %s is not allowed in FIPS mode", getKeyResp.Key.KeyType)
+	}
+
+	publicKey, err := s.parsePublicKeyPEM(getKeyResp.Key.PublicKeyPem, getKeyResp.Key.KeyType)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("failed to parse service public key: %w", err)
+	}
+
+	s.serviceKeyCache.Set(keyID, publicKey)
+	return publicKey, nil
+}
+
+func isFIPSKeyTypeAllowed(keyType keyManager.KeyType) bool {
+	switch keyType {
+	case keyManager.KeyType_KEY_TYPE_RSA_2048,
+		keyManager.KeyType_KEY_TYPE_RSA_3072,
+		keyManager.KeyType_KEY_TYPE_RSA_4096:
+		return true
+	default:
+		return false
+	}
+}
+
+type serviceKeyCache struct {
+	ttl time.Duration
+	mu  sync.RWMutex
+	key map[string]cachedServiceKey
+}
+
+type cachedServiceKey struct {
+	publicKey crypto.PublicKey
+	expires   time.Time
+}
+
+func newServiceKeyCache(ttl time.Duration) *serviceKeyCache {
+	return &serviceKeyCache{
+		ttl: ttl,
+		key: make(map[string]cachedServiceKey),
+	}
+}
+
+func (c *serviceKeyCache) Get(keyID string) (crypto.PublicKey, bool) {
+	c.mu.RLock()
+	entry, ok := c.key[keyID]
+	c.mu.RUnlock()
+	if !ok || time.Now().After(entry.expires) {
+		recordServiceKeyCacheEvent(false)
+		if ok {
+			c.mu.Lock()
+			// Remove expired entry to avoid repeated expiration checks under read lock.
+			delete(c.key, keyID)
+			c.mu.Unlock()
+		}
+		return nil, false
+	}
+	recordServiceKeyCacheEvent(true)
+	return entry.publicKey, true
+}
+
+func (c *serviceKeyCache) Set(keyID string, publicKey crypto.PublicKey) {
+	c.mu.Lock()
+	c.key[keyID] = cachedServiceKey{
+		publicKey: publicKey,
+		expires:   time.Now().Add(c.ttl),
+	}
+	c.mu.Unlock()
+}
+
+func (s *Server) decryptDEK(publicKey crypto.PublicKey, encryptedDek []byte) ([]byte, error) {
+	switch pubKey := publicKey.(type) {
+	case *rsa.PublicKey:
+		// Note: This is unusual - typically you decrypt with a private key, not public key
+		// This assumes the DEK was encrypted with the corresponding private key
+		// This is more like signature verification than decryption
+
+		// For RSA "decryption" with public key (reverse of private key encryption),
+		// we need to use the low-level RSA operations
+		return s.rsaPublicDecrypt(pubKey, encryptedDek)
+	default:
+		return nil, fmt.Errorf("unsupported public key type")
+	}
+}
+
+func (s *Server) rsaPublicDecrypt(pubKey *rsa.PublicKey, ciphertext []byte) ([]byte, error) {
+	// Convert ciphertext to big.Int
+	c := new(big.Int).SetBytes(ciphertext)
+
+	// Perform RSA public key operation: m = c^e mod n
+	e := big.NewInt(int64(pubKey.E))
+	m := new(big.Int).Exp(c, e, pubKey.N)
+
+	// Convert back to bytes
+	plaintext := m.Bytes()
+
+	// For OAEP padding, we need to remove the padding
+	// This is a simplified version - in production, you'd want proper OAEP unpadding
+	return plaintext, nil
+}
+
+func (s *Server) createWrapDeniedResponse(req *WrapDEKRequest, reason string) *WrapDEKResponse {
+	return &WrapDEKResponse{
+		WrappedDek:    nil,
+		KeyId:         "",
+		AccessGranted: false,
+		AccessReason:  reason,
+		AppliedRules:  []string{},
+		Timestamp:     timestamppb.Now(),
+	}
+}
+
+func (s *Server) createUnwrapDeniedResponse(req *UnwrapDEKRequest, reason string) *UnwrapDEKResponse {
+	return &UnwrapDEKResponse{
+		DekForSubject: nil,
+		AccessGranted: false,
+		AccessReason:  reason,
+		AppliedRules:  []string{},
+		Timestamp:     timestamppb.Now(),
+	}
+}
+
+// InMemorySubjectKeyStore implementation
+func NewInMemorySubjectKeyStore() *InMemorySubjectKeyStore {
+	store := &InMemorySubjectKeyStore{
+		keys: make(map[string]crypto.PublicKey),
+	}
+	store.addSampleKeys()
+	return store
+}
+
+func (s *InMemorySubjectKeyStore) GetSubjectPublicKey(ctx context.Context, subject string) (crypto.PublicKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	key, exists := s.keys[subject]
+	if !exists {
+		return nil, fmt.Errorf("public key not found for subject: %s", subject)
+	}
+
+	return key, nil
+}
+
+func (s *InMemorySubjectKeyStore) StoreSubjectPublicKey(ctx context.Context, subject string, publicKey crypto.PublicKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.keys[subject] = publicKey
+	return nil
+}
+
+func (s *InMemorySubjectKeyStore) ListSubjects(ctx context.Context) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	subjects := make([]string, 0, len(s.keys))
+	for subject := range s.keys {
+		subjects = append(subjects, subject)
+	}
+
+	return subjects, nil
+}
+
+func (s *InMemorySubjectKeyStore) addSampleKeys() {
+	// Generate sample RSA keys for testing subjects
+	subjects := []string{"user123", "service-account-1", "admin456", "test-user"}
+
+	for _, subject := range subjects {
+		privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			logger.Info("Failed to generate sample key for %s: %v", subject, err)
+			continue
+		}
+
+		s.keys[subject] = &privateKey.PublicKey
+		logger.Info("Added sample public key for subject: %s", subject)
+	}
+}

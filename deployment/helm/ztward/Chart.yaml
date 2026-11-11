@@ -1,0 +1,41 @@
+apiVersion: v2
+name: ztward
+description: A production-grade Helm chart for Ztward - Zero Trust Data Fabric platform with cryptographic key management, ABAC policy enforcement, and secure data access control
+type: application
+
+# Chart version - increment with chart changes
+version: 1.0.0
+
+# Application version - matches the Ztward release version
+appVersion: "1.0.0"
+
+keywords:
+  - zero-trust
+  - data-fabric
+  - key-management
+  - abac
+  - policy-enforcement
+  - grpc
+  - keycloak
+  - oidc
+
+maintainers:
+  - name: Benjamin Parrish
+    url: https://github.com/bdparrish
+
+# Dependencies for external charts (optional - can use subcharts)
+# dependencies:
+#   - name: postgresql
+#     version: "12.x.x"
+#     repository: https://charts.bitnami.com/bitnami
+#     condition: postgresql.enabled
+#   - name: redis
+#     version: "17.x.x"
+#     repository: https://charts.bitnami.com/bitnami
+#     condition: redis.enabled
+
+home: https://github.com/bdparrish/ztward
+sources:
+  - https://github.com/bdparrish/ztward
+
+icon: https://raw.githubusercontent.com/bdparrish/ztward/main/assets/logo.png

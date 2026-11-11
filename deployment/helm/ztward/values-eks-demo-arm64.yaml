@@ -1,0 +1,151 @@
+# AWS EKS overlay for the demo-arm64 cluster (us-east-2).
+# Use alongside values-ecr.yaml and values-free-tier.yaml:
+#
+#   helm upgrade --install ztward ./ztward \
+#     -n ztward \
+#     --create-namespace \
+#     -f ztward/values-ecr.yaml \
+#     -f ztward/values-free-tier.yaml \
+#     -f ztward/values-eks-demo-arm64.yaml
+#
+# This file assumes:
+#   - Images live in your private ECR registry (values-ecr.yaml)
+#   - AWS Secrets Manager (or another external system) populates the
+#     Kubernetes secrets referenced below
+#   - ALB Ingress Controller is installed; TLS termination can be added later
+
+cluster:
+  name: demo-arm64
+  region: us-east-2
+
+awsSecretsManager:
+  enabled: true
+  region: us-east-2            # your AWS region
+  secretStoreRef:
+    name: ztward-aws-sm      # your (Cluster)SecretStore name
+    kind: ClusterSecretStore   # or SecretStore if namespaced
+
+  ztwardSecretId: ztward-aws-sm
+  keycloakSecretId: keycloak-aws-sm
+  postgresqlSecretId: postgresql-aws-sm
+  adminKeySecretId: ztward-admin-key
+
+secrets:
+  ztward:
+    create: false
+  keycloak:
+    create: false
+  postgresql:
+    create: false
+
+# =============================================================================
+# Public ingress (ALB, HTTP-only for now)
+# =============================================================================
+
+keycloak:
+  config:
+    hostname: "auth.example.com"
+    hostnamePort: "443"
+    httpEnabled: true
+  ingress:
+    enabled: true
+    className: alb
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:<aws-account-id>:certificate/<certificate-id>
+    hosts:
+      - host: "auth.example.com"
+        paths:
+          - path: /
+            pathType: Prefix
+
+pap:
+  config:
+    oidcClientSecret: "<pap-secret>"
+    redirectUrl: "https://api.example.com/callback"
+    issuerURL: "https://auth.example.com/realms/ztward"
+    oidcAllowInsecureIssuer: false
+  ingress:
+    enabled: true
+    className: alb
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:<aws-account-id>:certificate/<certificate-id>
+    hosts:
+      - host: "api.example.com"
+        paths:
+          - path: /
+            pathType: Prefix
+
+papUI:
+  env:
+    VITE_KEYCLOAK_URL: "https://auth.example.com"
+    VITE_KEYCLOAK_REALM: "ztward"
+    VITE_KEYCLOAK_CLIENT_ID: "ztward-pap-ui"
+    VITE_API_URL: "https://api.example.com"
+  ingress:
+    enabled: true
+    className: alb
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:<aws-account-id>:certificate/<certificate-id>
+    hosts:
+      - host: "ui.example.com"
+        paths:
+          - path: /
+            pathType: Prefix
+
+envoy:
+  ingress:
+    enabled: true
+    className: alb
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:<aws-account-id>:certificate/<certificate-id>
+      alb.ingress.kubernetes.io/backend-protocol-version: HTTP2
+      nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    hosts:
+      - host: "grpc.example.com"
+        paths:
+          - path: /
+            pathType: Prefix
+    servicePort: 8443
+
+keyAccess:
+  config:
+    environment: production
+    oidc:
+      skipClientIDCheck: true
+  extraEnv:
+    - name: SSL_CERT_FILE
+      value: /etc/ssl/certs/ca-certificates.crt
+  caBundle:
+    enabled: true
+    configMapName: ztward-key-access-ca
+    file: certs/amazon-root-ca1.crt
+    mountPath: /etc/ssl/certs/ca-certificates.crt
+    subPath: ca-certificates.crt
+
+keyManager:
+  config:
+    environment: production
+  persistence:
+    enabled: false
+  adminKey:
+    useSecret: true
+    secretName: ztward-admin-key
+    secretKey: admin-key
+  externalKeysSecret:
+    enabled: false
