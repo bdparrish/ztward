@@ -97,6 +97,10 @@ func main() {
 			ClientSecret: cfg.OIDC.ClientSecret,
 			RedirectURL:  cfg.OIDC.RedirectURL,
 			Scopes:       cfg.OIDC.Scopes,
+			// Lets the PAP validate tokens whose issuer URL differs from the one it
+			// uses to reach Keycloak (e.g. Docker: browser sees localhost:8080,
+			// the PAP reaches keycloak:8080). Development only.
+			AllowInsecureIssuer: cfg.OIDC.AllowInsecureIssuer,
 		}
 		authService, err = pap.NewAuthService(oidcConfig)
 		if err != nil {

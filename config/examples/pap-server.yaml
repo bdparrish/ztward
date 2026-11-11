@@ -42,8 +42,13 @@ cache:
     prefix: "ztward:policy:"
 
 oidc:
-  enabled: false  # Disabled for Docker development (hostname issues)
+  enabled: true
   issuer_url: http://keycloak:8080/realms/ztward
+  # Development only: tokens are issued to the browser as http://localhost:8080/...,
+  # while the PAP reaches Keycloak as http://keycloak:8080/..., so the issuer and
+  # client-ID checks are skipped (token signatures are still verified against the
+  # realm's keys). Set to false in production, where both URLs are the same.
+  allow_insecure_issuer: true
   client_id: ztward-pap
   client_secret: ztward-pap-secret  # Override via ZTWARD_OIDC_CLIENT_SECRET
   redirect_url: http://localhost:8090/callback
